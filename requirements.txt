@@ -1,0 +1,7 @@
+GitPython
+pyrogram
+tgcrypto
+requests
+fastapi
+uvicorn
+PyGithub
