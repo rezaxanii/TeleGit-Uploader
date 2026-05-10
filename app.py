@@ -5,6 +5,7 @@ import requests
 import asyncio
 import threading
 import git
+import re
 from pathlib import Path
 from pyrogram import Client, filters
 from github import Github
@@ -39,14 +40,9 @@ def health():
 def run_web():
     uvicorn.run(web_app, host="0.0.0.0", port=7860)
 
-# --- GITHUB ENGINE (OPTIMIZED) ---
+# --- GITHUB ENGINE (UNTOUCHED) ---
 
 def upload_to_github_optimized(file_list, github_folder):
-    """
-    Clones once, copies all parts, pushes once.
-    file_list: List of Path objects to upload
-    github_folder: Destination folder in repo
-    """
     repo_dir = Path("repo_temp")
     if repo_dir.exists():
         shutil.rmtree(repo_dir)
@@ -78,24 +74,46 @@ def upload_to_github_optimized(file_list, github_folder):
 
     return links
 
-# --- UTILS ---
+# --- NEW & IMPROVED UTILS ---
 
-def get_clean_filename(message, url=None):
-    if message.document: return message.document.file_name
-    if message.video: return message.video.file_name or f"vid_{message.id}.mp4"
+async def progress(current, total, status_msg, action):
+    """Safe progress bar to avoid FloodWait"""
+    percent = current * 100 / total
+    
+    if int(percent) % 25 == 0:
+        try:
+            await status_msg.edit(f"🚀 {action}: `{percent:.1f}%`\n📦 `{current / (1024*1024):.1f}MB` / `{total / (1024*1024):.1f}MB`")
+        except:
+            pass
+
+def get_clean_filename(message=None, url=None):
+    """Advanced filename detector for Music and Links"""
+    if message and (message.document or message.video or message.audio or message.voice):
+        media = message.document or message.video or message.audio or message.voice
+        fname = getattr(media, 'file_name', None)
+        if not fname and message.audio:
+            fname = f"{message.audio.title or 'music'}.mp3"
+        return fname or f"file_{message.id}"
+    
     if url:
+        try:
+            with requests.get(url, stream=True, timeout=5) as r:
+                cd = r.headers.get('content-disposition')
+                if cd and 'filename=' in cd:
+                    names = re.findall('filename\*?=["\']?(?:UTF-8\'\')?([^"\';]+)["\']?', cd)
+                    if names: return requests.utils.unquote(names[0])
+        except:
+            pass
         name = url.split('/')[-1].split('?')[0]
-        return name if name else "file"
+        return requests.utils.unquote(name) if name else "file"
     return "file"
 
 def split_file(file_path: Path):
     output_folder = file_path.parent / f"split_{file_path.stem}"
     output_folder.mkdir(exist_ok=True)
-
     zip_tmp = output_folder / f"{file_path.name}.zip"
     with zipfile.ZipFile(zip_tmp, 'w', zipfile.ZIP_DEFLATED) as z:
         z.write(file_path, arcname=file_path.name)
-
     parts = []
     part_num = 1
     with open(zip_tmp, 'rb') as f:
@@ -107,7 +125,6 @@ def split_file(file_path: Path):
             p_path.write_bytes(chunk)
             parts.append(p_path)
             part_num += 1
-
     zip_tmp.unlink()
     return output_folder, parts
 
@@ -127,7 +144,7 @@ async def start_handler(client, message):
 async def main_handler(client, message):
     if message.text and not message.text.startswith("http"): return
 
-    status = await message.reply("⚡️ Processing...")
+    status = await message.reply("⚡️ Initializing...")
     temp_path = None
     split_dir = None
 
@@ -136,13 +153,19 @@ async def main_handler(client, message):
         if media:
             fname = get_clean_filename(message)
             await status.edit(f"📥 Downloading: `{fname}`")
-            temp_path = Path(await message.download(file_name=str(DOWNLOAD_DIR / fname)))
+            temp_path = Path(DOWNLOAD_DIR / fname)
+            await message.download(
+                file_name=str(temp_path),
+                progress=progress,
+                progress_args=(status, "Downloading")
+            )
         else:
             url = message.text
-            fname = get_clean_filename(message, url)
+            fname = get_clean_filename(url=url)
             await status.edit(f"📥 Fetching Link: `{fname}`")
             temp_path = DOWNLOAD_DIR / fname
             with requests.get(url, stream=True) as r:
+                r.raise_for_status()
                 with open(temp_path, 'wb') as f:
                     shutil.copyfileobj(r.raw, f)
 
@@ -151,13 +174,13 @@ async def main_handler(client, message):
         if f_size <= CHUNK_SIZE:
             await status.edit("📤 Uploading to GitHub...")
             links = upload_to_github_optimized([temp_path], "downloads")
-            formatted_links = links[0]
+            formatted_links = f"🔗 {links[0]}"
         else:
             await status.edit("📦 Splitting & Zipping...")
             split_dir, parts = split_file(temp_path)
             await status.edit(f"📤 Uploading {len(parts)} parts...")
             links = upload_to_github_optimized(parts, f"downloads/{temp_path.stem}")
-            formatted_links = "\n\n".join(links)
+            formatted_links = "\n\n".join([f"🧩 Part {i+1}: {l}" for i, l in enumerate(links)])
 
         await status.edit(f"✅ **Upload Complete!**\n\n{formatted_links}", disable_web_page_preview=True)
 
